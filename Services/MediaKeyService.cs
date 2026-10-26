@@ -5,10 +5,18 @@ namespace DpiMusicControl.Services;
 public static class MediaKeyService
 {
     private const uint InputKeyboard = 1;
+    private const ushort VkMediaNextTrack = 0xB0;
+    private const ushort VkMediaPreviousTrack = 0xB1;
     private const ushort VkMediaPlayPause = 0xB3;
     private const uint KeyEventFKeyUp = 0x0002;
 
-    public static bool SendPlayPause()
+    public static bool SendNextTrack() => SendMediaKey(VkMediaNextTrack);
+
+    public static bool SendPreviousTrack() => SendMediaKey(VkMediaPreviousTrack);
+
+    public static bool SendPlayPause() => SendMediaKey(VkMediaPlayPause);
+
+    private static bool SendMediaKey(ushort virtualKey)
     {
         var inputs = new[]
         {
@@ -19,7 +27,7 @@ public static class MediaKeyService
                 {
                     Keyboard = new KeyboardInput
                     {
-                        VirtualKey = VkMediaPlayPause
+                        VirtualKey = virtualKey
                     }
                 }
             },
@@ -30,7 +38,7 @@ public static class MediaKeyService
                 {
                     Keyboard = new KeyboardInput
                     {
-                        VirtualKey = VkMediaPlayPause,
+                        VirtualKey = virtualKey,
                         Flags = KeyEventFKeyUp
                     }
                 }

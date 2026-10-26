@@ -12,6 +12,7 @@ public sealed class GlobalInputHook : IDisposable
     private const int WmKeyDown = 0x0100;
     private const int WmSysKeyDown = 0x0104;
     private const int WmMButtonDown = 0x0207;
+    private const int WmMButtonUp = 0x0208;
     private const int WmXButtonDown = 0x020B;
 
     private readonly LowLevelMouseProc _mouseHookProc;
@@ -81,9 +82,9 @@ public sealed class GlobalInputHook : IDisposable
 
     private IntPtr MouseHookCallback(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code >= 0 && TryGetMouseTrigger(wParam, lParam, out var trigger))
+        if (code >= 0 && TryGetMouseTrigger(wParam, lParam, out var trigger, out var isDown))
         {
-            var args = new TriggerPressedEventArgs(trigger);
+            var args = new TriggerPressedEventArgs(trigger, isDown);
             TriggerPressed?.Invoke(this, args);
 
             if (args.Suppress)
@@ -111,14 +112,16 @@ public sealed class GlobalInputHook : IDisposable
         return CallNextHookEx(_keyboardHook, code, wParam, lParam);
     }
 
-    private static bool TryGetMouseTrigger(IntPtr wParam, IntPtr lParam, out InputTrigger trigger)
+    private static bool TryGetMouseTrigger(IntPtr wParam, IntPtr lParam, out InputTrigger trigger, out bool isDown)
     {
         trigger = default;
+        isDown = true;
         var message = wParam.ToInt32();
 
-        if (message == WmMButtonDown)
+        if (message is WmMButtonDown or WmMButtonUp)
         {
             trigger = InputTrigger.MiddleButton;
+            isDown = message == WmMButtonDown;
             return true;
         }
 
@@ -214,9 +217,11 @@ public sealed class GlobalInputHook : IDisposable
     }
 }
 
-public sealed class TriggerPressedEventArgs(InputTrigger trigger) : EventArgs
+public sealed class TriggerPressedEventArgs(InputTrigger trigger, bool isDown = true) : EventArgs
 {
     public InputTrigger Trigger { get; } = trigger;
+
+    public bool IsDown { get; } = isDown;
 
     public bool Suppress { get; set; }
 }

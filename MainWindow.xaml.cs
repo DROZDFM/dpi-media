@@ -18,12 +18,18 @@ public partial class MainWindow : Window
     private readonly SettingsService _settingsService = new();
     private readonly GlobalInputHook _inputHook = new();
     private readonly DispatcherTimer _captureTimeoutTimer;
+    private readonly DispatcherTimer _middleHoldTimer;
+    private readonly DispatcherTimer _middleClickTimer;
     private AppSettings _settings = new();
     private Forms.NotifyIcon? _notifyIcon;
     private Forms.ToolStripMenuItem? _trayToggleMenuItem;
     private InputTrigger _selectedTrigger = InputTrigger.XButton1;
     private DateTime _lastTriggerUtc = DateTime.MinValue;
     private bool _captureArmed;
+    private bool _middleButtonDown;
+    private bool _middleHoldTriggered;
+    private bool _middlePressHasPendingSingle;
+    private bool _suppressMiddleRelease;
     private bool _isInitializing;
     private bool _isExiting;
     private bool _hasShownTrayHint;
@@ -37,6 +43,16 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(7)
         };
         _captureTimeoutTimer.Tick += CaptureTimeoutTimer_Tick;
+        _middleHoldTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(500)
+        };
+        _middleHoldTimer.Tick += MiddleHoldTimer_Tick;
+        _middleClickTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(300)
+        };
+        _middleClickTimer.Tick += MiddleClickTimer_Tick;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -80,6 +96,7 @@ public partial class MainWindow : Window
         }
 
         _selectedTrigger = option.Value;
+        CancelMiddleGesture();
         _settings.Trigger = _selectedTrigger;
         SaveSettings();
         UpdateMappingVisuals();
@@ -93,6 +110,10 @@ public partial class MainWindow : Window
         }
 
         _settings.MappingEnabled = EnabledToggle.IsChecked == true;
+        if (!_settings.MappingEnabled)
+        {
+            CancelMiddleGesture();
+        }
         SaveSettings();
         UpdateMappingVisuals();
     }
@@ -129,6 +150,7 @@ public partial class MainWindow : Window
         }
 
         _captureArmed = true;
+        CancelMiddleGesture();
         CaptureButton.Content = "Слушаю…";
         CaptureButton.IsEnabled = false;
         _captureTimeoutTimer.Stop();
@@ -140,31 +162,27 @@ public partial class MainWindow : Window
     {
         var sent = MediaKeyService.SendPlayPause();
         SetCaptureMessage(
-            sent ? "Команда «Воспроизвести / пауза» отправлена." : "Не удалось отправить системную медиа-команду.",
+            sent ? "Команда «Пауза / воспроизведение» отправлена." : "Не удалось отправить системную медиа-команду.",
             isWarning: !sent);
     }
 
     private void InputHook_TriggerPressed(object? sender, TriggerPressedEventArgs e)
     {
+        if (e.Trigger == InputTrigger.MiddleButton)
+        {
+            HandleMiddleButtonInput(e);
+            return;
+        }
+
+        if (!e.IsDown)
+        {
+            return;
+        }
+
         if (_captureArmed)
         {
             e.Suppress = true;
-            _captureArmed = false;
-            _captureTimeoutTimer.Stop();
-
-            Dispatcher.BeginInvoke(() =>
-            {
-                _selectedTrigger = e.Trigger;
-                _settings.Trigger = _selectedTrigger;
-                TriggerComboBox.SelectedItem = TriggerOption.FromValue(_selectedTrigger);
-                CaptureButton.Content = "Определить";
-                CaptureButton.IsEnabled = true;
-                LastInputText.Text = $"Обнаружено: {TriggerOption.FromValue(_selectedTrigger).Detail}";
-                SetCaptureMessage($"Готово: {TriggerOption.FromValue(_selectedTrigger).Detail} назначена для Play / Pause.", isWarning: false);
-                SaveSettings();
-                UpdateMappingVisuals();
-            });
-
+            CaptureTrigger(e.Trigger);
             return;
         }
 
@@ -189,12 +207,146 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var sent = MediaKeyService.SendPlayPause();
-            LastInputText.Text = $"Последний сигнал: {TriggerOption.FromValue(e.Trigger).Detail}";
-            SetCaptureMessage(
-                sent ? "Команда «Воспроизвести / пауза» отправлена." : "Не удалось отправить системную медиа-команду.",
-                isWarning: !sent);
+            SendMediaCommand(
+                MediaKeyService.SendPlayPause,
+                "Пауза / воспроизведение",
+                TriggerOption.FromValue(e.Trigger).Detail);
         });
+    }
+
+    private void HandleMiddleButtonInput(TriggerPressedEventArgs e)
+    {
+        if (e.IsDown)
+        {
+            if (_captureArmed)
+            {
+                e.Suppress = true;
+                _suppressMiddleRelease = true;
+                CaptureTrigger(e.Trigger);
+                return;
+            }
+
+            if (!_settings.MappingEnabled || _selectedTrigger != InputTrigger.MiddleButton)
+            {
+                return;
+            }
+
+            e.Suppress = true;
+            _suppressMiddleRelease = true;
+            _middleButtonDown = true;
+            _middleHoldTriggered = false;
+            _middlePressHasPendingSingle = _middleClickTimer.IsEnabled;
+            if (_middlePressHasPendingSingle)
+            {
+                _middleClickTimer.Stop();
+            }
+
+            _middleHoldTimer.Stop();
+            _middleHoldTimer.Start();
+            return;
+        }
+
+        if (_suppressMiddleRelease)
+        {
+            e.Suppress = true;
+            _suppressMiddleRelease = false;
+        }
+
+        if (!_middleButtonDown)
+        {
+            return;
+        }
+
+        _middleButtonDown = false;
+        _middleHoldTimer.Stop();
+
+        if (_middleHoldTriggered)
+        {
+            _middleHoldTriggered = false;
+            _middlePressHasPendingSingle = false;
+            return;
+        }
+
+        if (!_settings.MappingEnabled || _selectedTrigger != InputTrigger.MiddleButton)
+        {
+            _middlePressHasPendingSingle = false;
+            return;
+        }
+
+        if (_middlePressHasPendingSingle)
+        {
+            _middlePressHasPendingSingle = false;
+            _middleClickTimer.Stop();
+            SendMediaCommand(MediaKeyService.SendPreviousTrack, "Предыдущий трек", "Колесико — двойное нажатие");
+            return;
+        }
+
+        _middleClickTimer.Stop();
+        _middleClickTimer.Start();
+    }
+
+    private void CaptureTrigger(InputTrigger trigger)
+    {
+        _captureArmed = false;
+        _captureTimeoutTimer.Stop();
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            _selectedTrigger = trigger;
+            _settings.Trigger = _selectedTrigger;
+            TriggerComboBox.SelectedItem = TriggerOption.FromValue(_selectedTrigger);
+            CaptureButton.Content = "Определить";
+            CaptureButton.IsEnabled = true;
+            LastInputText.Text = $"Обнаружено: {TriggerOption.FromValue(_selectedTrigger).Detail}";
+            SetCaptureMessage($"Готово: {TriggerOption.FromValue(_selectedTrigger).Detail} назначена для управления музыкой.", isWarning: false);
+            SaveSettings();
+            UpdateMappingVisuals();
+        });
+    }
+
+    private void MiddleHoldTimer_Tick(object? sender, EventArgs e)
+    {
+        _middleHoldTimer.Stop();
+        if (!_middleButtonDown || !_settings.MappingEnabled || _selectedTrigger != InputTrigger.MiddleButton)
+        {
+            return;
+        }
+
+        _middleHoldTriggered = true;
+        if (_middlePressHasPendingSingle)
+        {
+            SendMediaCommand(MediaKeyService.SendNextTrack, "Следующий трек", "Колесико — короткое нажатие");
+            _middlePressHasPendingSingle = false;
+        }
+
+        SendMediaCommand(MediaKeyService.SendPlayPause, "Пауза / воспроизведение", "Колесико — удержание");
+    }
+
+    private void MiddleClickTimer_Tick(object? sender, EventArgs e)
+    {
+        _middleClickTimer.Stop();
+        if (_settings.MappingEnabled && _selectedTrigger == InputTrigger.MiddleButton)
+        {
+            SendMediaCommand(MediaKeyService.SendNextTrack, "Следующий трек", "Колесико — короткое нажатие");
+        }
+    }
+
+    private void CancelMiddleGesture()
+    {
+        _middleHoldTimer.Stop();
+        _middleClickTimer.Stop();
+        _middleButtonDown = false;
+        _middleHoldTriggered = false;
+        _middlePressHasPendingSingle = false;
+    }
+
+    private void SendMediaCommand(Func<bool> sendCommand, string action, string signal)
+    {
+        var sent = sendCommand();
+        LastInputText.Text = $"Последний сигнал: {signal}";
+        SetCaptureMessage(
+            sent ? $"Команда «{action}» отправлена." : "Не удалось отправить системную медиа-команду.",
+            isWarning: !sent);
     }
 
     private void UpdateMappingVisuals()
@@ -203,9 +355,18 @@ public partial class MainWindow : Window
         var option = TriggerOption.FromValue(_selectedTrigger);
 
         HeroGlyph.Text = enabled ? "Ⅱ" : "▶";
+        var isMiddleButton = _selectedTrigger == InputTrigger.MiddleButton;
         HeroDetailText.Text = enabled
-            ? $"{option.Detail} → Воспроизвести / пауза"
+            ? isMiddleButton
+                ? "Колесико: нажать — далее, дважды — назад, удержать — пауза"
+                : $"{option.Detail} → Воспроизвести / пауза"
             : $"{option.Detail} выбрана, сопоставление на паузе";
+        ActionTitleText.Text = isMiddleButton ? "Жесты колесика" : "Действие";
+        ActionDescriptionText.Text = isMiddleButton
+            ? "Команды отправляются активному музыкальному приложению Windows"
+            : "Команда отправляется активному музыкальному приложению Windows";
+        SingleActionPanel.Visibility = isMiddleButton ? Visibility.Collapsed : Visibility.Visible;
+        MiddleActionPanel.Visibility = isMiddleButton ? Visibility.Visible : Visibility.Collapsed;
         FooterStatusText.Text = enabled ? "Сопоставление активно" : "Сопоставление на паузе";
         StatusTitle.Text = enabled ? "Активно" : "Пауза";
         StatusTitle.Foreground = new SolidColorBrush((MediaColor)MediaColorConverter.ConvertFromString(enabled ? "#5DE4B2" : "#FFCF70"));
@@ -280,6 +441,7 @@ public partial class MainWindow : Window
     private void Window_Closed(object? sender, EventArgs e)
     {
         _captureTimeoutTimer.Stop();
+        CancelMiddleGesture();
         _inputHook.Dispose();
         DisposeTrayIcon();
     }
@@ -305,6 +467,7 @@ public partial class MainWindow : Window
     {
         Hide();
         WindowState = WindowState.Normal;
+        CancelMiddleGesture();
 
         try
         {
@@ -383,6 +546,7 @@ public partial class MainWindow : Window
         }
 
         _isExiting = true;
+        CancelMiddleGesture();
         _inputHook.Dispose();
         DisposeTrayIcon();
         Close();
